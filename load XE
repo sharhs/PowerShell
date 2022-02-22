@@ -1,0 +1,246 @@
+1
+
+sl "C:\"
+C:\PS\TransferXEventData\Transfer-XEventData.ps1 -XEventDirectoryName "\\BD-SRV-TITAN\A!AuditLogin\" -XEventInfoFileName "C:\PS\TransferXEventData\login.json" -ConnectionString "Data Source=BD-SRV-QUADRO;Integrated Security=SSPI;Initial Catalog=Audit" -DestinationTableName "dbo.EventLoginBuffer" -DestinationXEventDirectoryName "G:\Audit\Login\" -XEventAssemblyDirectoryName "C:\Program Files\Microsoft SQL Server\MSSQL12.MSSQLSERVER\MSSQL\Binn\"
+
+2
+
+"C:\PS\TransferXEventData\Save-DataTable.ps1"
+"C:\PS\TransferXEventData\Transfer-XEventData.ps1"
+"C:\PS\TransferXEventData\Load-XEventToDataTable.ps1"
+"C:\PS\TransferXEventData\login.json"
+
+
+3
+Save-DataTable
+
+function Save-DataTable {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [String]
+        $ConnectionString,
+        [Parameter(Mandatory)]
+        [String]
+        $DestinationTableName,
+        [Parameter(Mandatory)]
+        [System.Data.Datatable]
+        $DataTable
+    )
+    
+    $connection = [System.Data.SqlClient.SqlConnection]::new($ConnectionString)
+    [void]$connection.Open()
+
+    $bulkCopy = [System.Data.SqlClient.SqlBulkCopy]::new($connection)
+    $bulkCopy.BulkCopyTimeout  = 0
+    $bulkCopy.DestinationTableName = $DestinationTableName
+
+    foreach($column in $DataTable.Columns) {
+        [void]$bulkCopy.ColumnMappings.Add($column.ColumnName, $column)
+    }
+
+    [void]$bulkCopy.WriteToServer($DataTable)
+
+    [void]$connection.Close()
+}
+
+
+
+4
+
+Transfer-XEventData.ps1
+
+param (
+    [Parameter(Mandatory)]
+    [String]
+    $XEventDirectoryName,
+    [Parameter(Mandatory)]
+    [String]
+    $XEventInfoFileName,
+    [Parameter(Mandatory)]
+    [String]
+    $ConnectionString,
+    [Parameter(Mandatory)]
+    [String]
+    $DestinationTableName,
+    [String]
+    $DestinationXEventDirectoryName,
+    [String]
+    $XEventAssemblyDirectoryName
+)
+
+$scriptPath = Split-Path $MyInvocation.MyCommand.Path -Parent
+
+. "$scriptPath\Load-XEventToDataTable.ps1"
+. "$scriptPath\Save-DataTable.ps1"
+
+if (-not [String]::IsNullOrEmpty($XEventAssemblyDirectoryName)) {
+    Add-Type -Path "$XEventAssemblyDirectoryName\Microsoft.SqlServer.XE.Core.dll" | Out-Null
+    Add-Type -Path "$XEventAssemblyDirectoryName\Microsoft.SqlServer.XEvent.Linq.dll" | Out-Null
+}
+
+$XEventInfo = Get-Content -Path $XEventInfoFileName | ConvertFrom-Json
+
+$XEventFileNames = @(Get-ChildItem -Path $XEventDirectoryName | Sort-Object CreationTime | Select-Object -ExpandProperty FullName)
+
+foreach($fileName in $XEventFileNames) {
+    $dataTable = Load-XEventToDataTable -XEventFileName $fileName -XEventInfo $XEventInfo
+
+    Save-DataTable -ConnectionString $ConnectionString -DestinationTableName $DestinationTableName -DataTable $dataTable
+}
+
+if (-not [String]::IsNullOrEmpty($DestinationXEventDirectoryName)) {
+    foreach ($fileName in $XEventFileNames) {
+        if ($fileName -ne $XEventFileNames[($XEventFileNames.Count - 1)]) {
+            Move-Item -Path $fileName -Destination $DestinationXEventDirectoryName -Force
+        }
+    }
+}
+
+
+
+
+5
+
+Load-XEventToDataTable.ps1
+
+function Load-XEventToDataTable {
+    param (
+        [Parameter(Mandatory)]
+        [String]
+        $XEventFileName,
+        [Parameter(Mandatory)]
+        [PSCustomObject]
+        $XEventInfo
+    )
+
+    $dataTable = [System.Data.Datatable]::new()
+
+    foreach ($column in $XEventInfo.Columns) {
+        [void]$dataTable.Columns.Add($column.ColumnMapping)
+    }
+
+    $XEventData = [Microsoft.SqlServer.XEvent.Linq.QueryableXEventData]::new($XEventFileName)
+
+    foreach ($event in $XEventData) {
+        if ($event.Name -ne $XEventInfo.Name) {
+            continue
+        }
+        
+        $row = $dataTable.NewRow()
+
+        foreach($column in $XEventInfo.Columns) {
+            switch ($column.ObjectType) {
+                "Action" { 
+                    $row[$column.ColumnMapping] = $event.Actions[$column.Name].Value
+                    break
+                }
+                "Field" { 
+                    $row[$column.ColumnMapping] = $event.Fields[$column.Name].Value
+                    break
+                }
+                "Property" { 
+                    if ($column.Name -eq "name") {
+                        $row[$column.ColumnMapping] = $event.Name
+                    } elseif ($column.Name -eq "timestamp") {
+                        $row[$column.ColumnMapping] = $event.Timestamp
+                    } elseif ($column.Name -eq "file_name") {
+                        $row[$column.ColumnMapping] = (Split-Path $XEventFileName -Leaf)
+                    }
+                    break
+                }
+            }
+        }
+
+        [void]$dataTable.Rows.Add($row)
+    }
+
+    $XEventData.Dispose()
+
+    return ,$dataTable
+}
+
+
+
+6
+
+login.json
+
+
+{
+    "Name": "login",
+    "Columns": [
+        {
+            "Name": "server_instance_name",
+            "DataType": "String",
+            "ObjectType": "Action",
+            "ColumnMapping": "ServerName"
+        },
+        {
+            "Name": "file_name",
+            "DataType": "String",
+            "ObjectType": "Property",
+            "ColumnMapping": "FileName"
+        },
+        {
+            "Name": "timestamp",
+            "DataType": "DateTimeOffSet",
+            "ObjectType": "Property",
+            "ColumnMapping": "Timestamp"
+        },
+        {
+            "Name": "client_app_name",
+            "DataType": "String",
+            "ObjectType": "Action",
+            "ColumnMapping": "ApplicationName"
+        },
+        {
+            "Name": "client_hostname",
+            "DataType": "String",
+            "ObjectType": "Action",
+            "ColumnMapping": "HostName"
+        },
+        {
+            "Name": "database_name",
+            "DataType": "String",
+            "ObjectType": "Field",
+            "ColumnMapping": "DatabaseName"
+        },
+        {
+            "Name": "is_dac",
+            "DataType": "Boolean",
+            "ObjectType": "Field",
+            "ColumnMapping": "IsDAC"
+        },
+        {
+            "Name": "session_id",
+            "DataType": "Int32",
+            "ObjectType": "Action",
+            "ColumnMapping": "SessionID"
+        },
+        {
+            "Name": "username",
+            "DataType": "String",
+            "ObjectType": "Action",
+            "ColumnMapping": "UserName"
+        },
+        {
+            "Name": "server_principal_name",
+            "DataType": "String",
+            "ObjectType": "Action",
+            "ColumnMapping": "ServerPrincipalName"
+        },
+        {
+            "Name": "session_server_principal_name",
+            "DataType": "String",
+            "ObjectType": "Action",
+            "ColumnMapping": "SessionServerPrincipalName"
+        },
+        {
+            "Name": "event_sequence",
+            "DataType": "Int64",
+            "ObjectType": "Action",
+            "ColumnMapping": "EventSequence"
+        }
+    ]
+}
