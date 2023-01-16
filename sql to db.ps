@@ -1,0 +1,14 @@
+$dir = "disk:\dir\"
+
+Set-Location $dir
+
+$sqr=Get-ChildItem $dir | select-object FullName
+
+foreach ($name in $sqr)
+{
+echo $name
+Invoke-Sqlcmd -InputFile $name -ServerInstance "servername" 
+}
+
+##
+Invoke-Sqlcmd -InputFile disk:\dir\filename.sql -ServerInstance "instance-name" | Out-File disk:\dir\filename.sql.log
